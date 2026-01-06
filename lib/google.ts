@@ -49,6 +49,9 @@ export class GoogleApiError extends Error {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const MAX_GRID_POINTS = 16;
+const MAX_PAGES_PER_POINT = 3;
+const MAX_TOTAL_RESULTS = 500;
 
 const buildUrl = (base: string, params: Record<string, string | number>) => {
   const search = new URLSearchParams(params as Record<string, string>);
@@ -81,6 +84,60 @@ const parseNewApiError = async (res: Response) => {
   } catch {
     return new GoogleApiError(`Places request failed with ${res.status}`);
   }
+};
+
+type GridPoint = { lat: number; lng: number; radiusMeters: number };
+
+const metersPerDegreeLat = 111_000;
+
+const metersPerDegreeLng = (lat: number) =>
+  111_000 * Math.cos((lat * Math.PI) / 180);
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.max(min, Math.min(value, max));
+
+const buildGridPoints = (
+  center: { lat: number; lng: number },
+  viewport?: GeocodeResult["viewport"]
+): GridPoint[] => {
+  if (!viewport) {
+    return [{ lat: center.lat, lng: center.lng, radiusMeters: 40000 }];
+  }
+
+  const latMin = viewport.southwest.lat;
+  const latMax = viewport.northeast.lat;
+  const lngMin = viewport.southwest.lng;
+  const lngMax = viewport.northeast.lng;
+
+  const latSpan = Math.abs(latMax - latMin);
+  const lngSpan = Math.abs(lngMax - lngMin);
+
+  const largeCity = latSpan > 0.35 || lngSpan > 0.35;
+  const rows = largeCity ? 4 : 3;
+  const cols = largeCity ? 4 : 3;
+
+  const latStep = latSpan / rows;
+  const lngStep = lngSpan / cols;
+
+  const avgLat = (latMin + latMax) / 2;
+  const latMeters = latStep * metersPerDegreeLat;
+  const lngMeters = lngStep * metersPerDegreeLng(avgLat);
+  const radiusMeters = clamp(
+    Math.max(latMeters, lngMeters) * 0.75,
+    5000,
+    40000
+  );
+
+  const points: GridPoint[] = [];
+  for (let row = 0; row < rows; row++) {
+    const lat = latMin + latStep * (row + 0.5);
+    for (let col = 0; col < cols; col++) {
+      const lng = lngMin + lngStep * (col + 0.5);
+      points.push({ lat, lng, radiusMeters });
+    }
+  }
+
+  return points.slice(0, MAX_GRID_POINTS);
 };
 
 export async function geocodeCity(
@@ -124,7 +181,8 @@ async function fetchPlacesPage(
   query: string,
   apiKey: string,
   pageToken?: string,
-  location?: { lat: number; lng: number }
+  location?: { lat: number; lng: number },
+  radiusMeters?: number
 ): Promise<PlacesTextSearchResponse> {
   const body: Record<string, unknown> = {
     textQuery: query,
@@ -138,7 +196,7 @@ async function fetchPlacesPage(
           latitude: location.lat,
           longitude: location.lng
         },
-        radius: 40000
+        radius: radiusMeters ?? 40000
       }
     };
   }
@@ -194,59 +252,76 @@ export async function searchBarberShops(
   city: string,
   apiKey: string,
   includeDetails = false
-): Promise<{ results: BarberPlace[]; pages: number }> {
+): Promise<{
+  results: BarberPlace[];
+  pages: number;
+  strategy: "grid";
+  gridPoints: number;
+  warnings: string[];
+}> {
   const geo = await geocodeCity(city, apiKey);
 
-  const query = `barber shop in ${city}`;
+  const query = "barber shop";
   const seen = new Map<string, BarberPlace>();
-  let pageToken: string | undefined;
   let pages = 0;
-  let invalidPageAttempts = 0;
+  const warnings: string[] = [];
+  const gridPoints = buildGridPoints(geo.location, geo.viewport);
 
-  do {
-    if (pageToken) {
-      // next_page_token requires a short delay before use
-      await sleep(2000);
-    }
+  for (const point of gridPoints) {
+    let pageToken: string | undefined;
+    let pageCount = 0;
 
-    const page = await fetchPlacesPage(query, apiKey, pageToken, geo.location);
+    do {
+      if (pageToken) {
+        // nextPageToken requires a short delay before use
+        await sleep(2000);
+      }
 
-    if (!page.places?.length && pageToken) {
-      invalidPageAttempts += 1;
-      if (invalidPageAttempts >= 3) {
+      const page = await fetchPlacesPage(
+        query,
+        apiKey,
+        pageToken,
+        { lat: point.lat, lng: point.lng },
+        point.radiusMeters
+      );
+
+      pages += 1;
+      pageCount += 1;
+
+      const pageResults = page.places || [];
+      for (const place of pageResults) {
+        const placeId = place.id;
+        if (!placeId || seen.has(placeId)) continue;
+        const entry: BarberPlace = {
+          name: place.displayName?.text || "Unknown",
+          formatted_address: place.formattedAddress || "",
+          lat: place.location?.latitude ?? 0,
+          lng: place.location?.longitude ?? 0,
+          place_id: placeId,
+          rating: place.rating,
+          user_ratings_total: place.userRatingCount,
+          types: place.types
+        };
+        seen.set(placeId, entry);
+        if (seen.size >= MAX_TOTAL_RESULTS) {
+          warnings.push(
+            `Stopped early after ${MAX_TOTAL_RESULTS} results to control API cost.`
+          );
+          break;
+        }
+      }
+
+      if (seen.size >= MAX_TOTAL_RESULTS) {
         break;
       }
-      await sleep(1500);
-      continue;
-    }
 
-    invalidPageAttempts = 0;
-    pages += 1;
+      pageToken = page.nextPageToken;
+    } while (pageToken && pageCount < MAX_PAGES_PER_POINT);
 
-    const pageResults = page.places || [];
-
-    if (!pageResults.length && !page.nextPageToken) {
+    if (seen.size >= MAX_TOTAL_RESULTS) {
       break;
     }
-
-    for (const place of pageResults) {
-      const placeId = place.id;
-      if (!placeId || seen.has(placeId)) continue;
-      const entry: BarberPlace = {
-        name: place.displayName?.text || "Unknown",
-        formatted_address: place.formattedAddress || "",
-        lat: place.location?.latitude ?? 0,
-        lng: place.location?.longitude ?? 0,
-        place_id: placeId,
-        rating: place.rating,
-        user_ratings_total: place.userRatingCount,
-        types: place.types
-      };
-      seen.set(placeId, entry);
-    }
-
-    pageToken = page.nextPageToken;
-  } while (pageToken);
+  }
 
   const results = Array.from(seen.values());
 
@@ -262,5 +337,11 @@ export async function searchBarberShops(
     }
   }
 
-  return { results, pages };
+  return {
+    results,
+    pages,
+    strategy: "grid",
+    gridPoints: gridPoints.length,
+    warnings
+  };
 }

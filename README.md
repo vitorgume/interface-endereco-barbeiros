@@ -35,10 +35,10 @@ GOOGLE_MAPS_API_KEY=your_api_key_here
 - Input a city, e.g. `"Ribeirão Preto, SP"`.
 - Backend `POST /api/search`:
   - Geocodes the city.
-  - Runs Places **Text Search** for `"barber shop in <city>"`.
-  - Follows `next_page_token` (with ~2s waits) to fetch as many pages as Google returns.
+  - Runs Places **Text Search** for `"barber shop"` using a grid over the city viewport.
+  - Follows `nextPageToken` (with ~2s waits) to fetch up to 3 pages per grid point.
   - De-duplicates by `place_id`.
-  - Optionally fetches phone/website via Place Details (capped to 60 places to avoid quota spikes).
+  - Optionally fetches phone/website via Place Details (capped to 50 places to avoid quota spikes).
 - Frontend shows the results count and pages fetched and lets you download the CSV.
 
 ### CSV columns
@@ -57,6 +57,7 @@ GOOGLE_MAPS_API_KEY=your_api_key_here
 
 - The API key is read only on the server; the client never sees it.
 - If Google returns `OVER_QUERY_LIMIT`, the UI will surface a warning and results may be partial.
+- Grid search issues multiple Places requests for large cities, which can increase cost.
 - Place Details calls are intentionally capped to reduce quota usage.
 - CSV uses standard escaping so it opens cleanly in Excel/Sheets.
 

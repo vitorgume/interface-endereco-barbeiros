@@ -55,15 +55,18 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { results, pages } = await searchBarberShops(
-      city,
-      apiKey,
-      includeDetails
-    );
+    const { results, pages, strategy, gridPoints, warnings } =
+      await searchBarberShops(city, apiKey, includeDetails);
 
     return NextResponse.json({
       results: results.map(normalizePlace),
-      meta: { total: results.length, pages }
+      meta: {
+        total: results.length,
+        pages,
+        strategy,
+        gridPoints,
+        warnings
+      }
     });
   } catch (err) {
     if (err instanceof GoogleApiError) {

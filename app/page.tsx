@@ -8,7 +8,13 @@ type NormalizedPlace = BarberPlace & { google_maps_url: string };
 
 type SearchResponse = {
   results: NormalizedPlace[];
-  meta?: { total: number; pages: number };
+  meta?: {
+    total: number;
+    pages: number;
+    strategy?: string;
+    gridPoints?: number;
+    warnings?: string[];
+  };
   error?: string;
 };
 
@@ -62,12 +68,16 @@ export default function Home() {
           pages: 1
         }
       );
-
-      if (includeDetails && (data.results?.length || 0) > 60) {
-        setWarning(
-          "Place details fetched only for the first 60 places to stay within quota."
+      const warningMessages: string[] = [];
+      if (data.meta?.warnings?.length) {
+        warningMessages.push(...data.meta.warnings);
+      }
+      if (includeDetails && (data.results?.length || 0) > 50) {
+        warningMessages.push(
+          "Place details fetched only for the first 50 places to stay within quota."
         );
       }
+      setWarning(warningMessages.length ? warningMessages.join(" ") : null);
     } catch (err) {
       setError("Unexpected error. Please try again.");
       setMeta({ total: 0, pages: 0 });
@@ -124,7 +134,7 @@ export default function Home() {
                 onChange={(e) => setIncludeDetails(e.target.checked)}
                 disabled={loading}
               />
-              Include phone/website (slower, limited to ~60)
+              Include phone/website
             </label>
           </div>
 
